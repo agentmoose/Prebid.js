@@ -3145,4 +3145,192 @@ describe('adapterManager tests', function () {
       sinon.assert.calledWith(GDPR_GVLIDS.register, MODULE_TYPE_ANALYTICS, 'mock', 123);
     });
   });
+
+  describe('bidder spec validation', function() {
+    // Sample bid objects for testing
+    const emptyBid = {};
+    const minimalValidBid = { params: { testParam: 123 } }; // A bid that might be valid for some adapters
+
+    Object.keys(adapterManager.bidderRegistry).forEach(bidderCode => {
+      const adapter = adapterManager.bidderRegistry[bidderCode];
+
+      if (adapter && typeof adapter.getSpec === 'function') {
+        const spec = adapter.getSpec();
+
+        if (spec && typeof spec === 'object') { // Check if spec is a valid object
+          // Moved the describe block to be more encompassing for the adapter
+          describe(`for ${bidderCode} adapter (spec found)`, function() {
+            // Tests for isBidRequestValid
+            if (typeof spec.isBidRequestValid === 'function') {
+              it('spec.isBidRequestValid should exist and be a function', function() {
+                expect(spec.isBidRequestValid).to.be.a('function');
+              });
+
+              it('should identify an empty bid as invalid (if isBidRequestValid exists)', function() {
+              expect(spec.isBidRequestValid(emptyBid)).to.be.false;
+            });
+
+            // This test is more speculative as "minimalValidBid" might still be invalid for some adapters.
+            // Adapters with no required params might return true.
+            // For this generic test, we can't know each adapter's specific required params.
+            // We are primarily testing the function's existence and basic negative case.
+            it('should correctly evaluate a potentially valid bid (if isBidRequestValid exists)', function() {
+              // We can't assert true or false definitively without knowing adapter specifics.
+              // Instead, we just call it to ensure it doesn't throw for a common bid structure.
+              try {
+                spec.isBidRequestValid(minimalValidBid);
+              } catch (e) {
+                expect.fail(`isBidRequestValid for ${bidderCode} threw an error for ${JSON.stringify(minimalValidBid)}: ${e.message}`);
+              }
+            });
+            } else {
+              it('spec.isBidRequestValid function should exist', function() {
+                expect(spec.isBidRequestValid).to.be.a('function');
+              });
+            }
+
+            // Tests for supportedMediaTypes
+            if (spec.hasOwnProperty('supportedMediaTypes')) {
+              it('spec.supportedMediaTypes should exist and be a non-empty array', function() {
+                expect(spec.supportedMediaTypes).to.be.an('array').and.to.not.be.empty;
+              });
+
+              if (Array.isArray(spec.supportedMediaTypes) && spec.supportedMediaTypes.length > 0) {
+                it('spec.supportedMediaTypes should contain valid media types', function() {
+                  const KNOWN_MEDIA_TYPES = ['banner', 'native', 'video'];
+                  spec.supportedMediaTypes.forEach(mediaType => {
+                    expect(KNOWN_MEDIA_TYPES).to.include(mediaType);
+                  });
+                });
+              }
+            } else {
+              it('spec.supportedMediaTypes property should exist', function() {
+                expect(spec.hasOwnProperty('supportedMediaTypes')).to.be.true;
+              });
+            }
+
+            // Tests for getUserSyncs
+            if (typeof spec.getUserSyncs === 'function') {
+              it('spec.getUserSyncs should be a function', function() {
+                // This assertion is slightly redundant due to the if condition, but good for clarity
+                expect(spec.getUserSyncs).to.be.a('function');
+              });
+
+              const testSyncOptions = (syncOptions, description) => {
+                it(`should return valid syncs or no syncs (undefined/null/empty array) for ${description}`, function() {
+                  const minimalGdprConsent = { gdprApplies: false, consentString: undefined, vendorData: {} };
+                  const minimalUspConsent = '1---';
+                  const minimalGppConsent = { gppString: undefined, applicableSections: [] };
+                  const syncs = spec.getUserSyncs(syncOptions, [], minimalGdprConsent, minimalUspConsent, minimalGppConsent);
+                  if (syncs === undefined || syncs === null || (Array.isArray(syncs) && syncs.length === 0)) {
+                    // This is a valid outcome (adapter chooses not to sync or has no syncs for these options)
+                    expect(true).to.be.true;
+                  } else {
+                    expect(syncs).to.be.an('array');
+                    syncs.forEach(sync => {
+                      expect(sync).to.have.property('type').that.is.oneOf(['pixel', 'iframe', 'image']); // Added 'image'
+                      expect(sync).to.have.property('url').that.is.a('string').and.to.not.be.empty;
+                      // Allow 'image' type if pixelEnabled is true
+                      if (sync.type === 'pixel' && !syncOptions.pixelEnabled) {
+                        expect.fail(`Adapter ${bidderCode} returned a pixel sync when pixelEnabled was false for ${description}.`);
+                      }
+                      if (sync.type === 'image' && !syncOptions.pixelEnabled) {
+                        expect.fail(`Adapter ${bidderCode} returned an image sync when pixelEnabled was false for ${description}.`);
+                      }
+                      if (sync.type === 'iframe' && !syncOptions.iframeEnabled) {
+                        expect.fail(`Adapter ${bidderCode} returned a pixel sync when pixelEnabled was false for ${description}.`);
+                      }
+                      if (sync.type === 'iframe' && !syncOptions.iframeEnabled) {
+                        expect.fail(`Adapter ${bidderCode} returned an iframe sync when iframeEnabled was false for ${description}.`);
+                      }
+                    });
+                  }
+                });
+              };
+
+              testSyncOptions({ pixelEnabled: true, iframeEnabled: true }, 'all syncs enabled');
+              testSyncOptions({ pixelEnabled: true, iframeEnabled: false }, 'pixel only enabled');
+              testSyncOptions({ pixelEnabled: false, iframeEnabled: true }, 'iframe only enabled');
+              testSyncOptions({ pixelEnabled: false, iframeEnabled: false }, 'all syncs disabled');
+
+            } else if (spec.hasOwnProperty('getUserSyncs')) {
+              // If getUserSyncs exists but is not a function
+              it('spec.getUserSyncs, if defined, should be a function', function() {
+                expect(spec.getUserSyncs).to.be.a('function');
+              });
+            }
+            // If spec.getUserSyncs is not defined at all, we don't add a failing test for its absence,
+            // as it's an optional function. Adapters are not required to implement it.
+
+            // Tests for interpretResponse
+            if (typeof spec.interpretResponse === 'function') {
+              it('spec.interpretResponse should be a function', function() {
+                expect(spec.interpretResponse).to.be.a('function');
+              });
+
+              it('should process a generic server response without crashing and return an array', function() {
+                const genericServerResponse = { body: {} }; // Minimal, but valid structure for some
+                const minimalBidRequest = {
+                  bidder: bidderCode,
+                  params: {}, // Params the adapter might have used in buildRequests
+                  adUnitCode: 'test-adunit-code',
+                  bidId: `test-bid-id-${bidderCode}`,
+                  sizes: [[300, 250]],
+                  mediaTypes: { banner: { sizes: [[300, 250]] } } // Common media type
+                };
+                let returnedBids;
+                try {
+                  returnedBids = spec.interpretResponse(genericServerResponse, minimalBidRequest);
+                } catch (e) {
+                  expect.fail(`spec.interpretResponse for ${bidderCode} threw an error: ${e.message}`);
+                }
+
+                expect(returnedBids).to.be.an('array'); // Should always return an array
+
+                if (returnedBids.length > 0) {
+                  returnedBids.forEach(bid => {
+                    expect(bid).to.be.an('object');
+                    // Check for a few core Prebid bid properties
+                    // Not all are strictly mandatory for all bid types, but good to check common ones.
+                    expect(bid).to.have.property('cpm');
+                    expect(bid).to.have.property('currency');
+                    expect(bid).to.have.property('width');
+                    expect(bid).to.have.property('height');
+                    expect(bid).to.have.property('creativeId');
+                    expect(bid).to.have.property('requestId'); // Essential for matching
+                    // Optional but common: netRevenue, ttl, ad
+                    // expect(bid).to.have.property('ad');
+                    // expect(bid).to.have.property('ttl');
+                    // expect(bid).to.have.property('netRevenue');
+                  });
+                }
+              });
+            } else if (spec.hasOwnProperty('interpretResponse')) {
+              it('spec.interpretResponse, if defined, should be a function', function() {
+                expect(spec.interpretResponse).to.be.a('function');
+              });
+            }
+            // Not failing if interpretResponse is missing, as it's essential and bidderFactory should create it.
+            // A failure in the above 'if' block implies it's missing or not a function.
+
+          }); // End describe `for ${bidderCode} adapter (spec found)`
+        } else { // If spec is not a valid object (e.g. null, undefined)
+          describe(`for ${bidderCode} (adapter spec retrieval)`, function() {
+            it('should have a valid spec object returned by getSpec()', function() {
+              expect(spec).to.exist.and.to.be.an('object');
+            });
+          });
+        }
+      } else { // if adapter itself is problematic or getSpec is not a function
+         describe(`for ${bidderCode} (adapter structure check)`, function() {
+            it('should be a valid adapter object with a getSpec method', function() {
+              expect(adapter).to.exist.and.to.be.an('object');
+              if (adapter) { // Check getSpec only if adapter exists
+                expect(adapter.getSpec).to.be.a('function');
+              }
+            });
+         });
+      }
+    });
+  });
 });
